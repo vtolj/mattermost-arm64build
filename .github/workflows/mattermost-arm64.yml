@@ -1,0 +1,146 @@
+name: mattermost-arm64
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Mattermost version to build (empty = latest release)"
+        required: false
+        default: ""
+      sign:
+        description: "Cosign keyless sign the pushed image"
+        required: false
+        type: boolean
+        default: false
+      sbom:
+        description: "Generate and attach SBOM (CycloneDX)"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 3 * * *"   
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   
+
+env:
+  IMAGE: ghcr.io/vtolj/mattermost
+
+concurrency:
+  group: mattermost-arm64
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover version and check registry
+    runs-on: ubuntu-24.04
+    outputs:
+      TAG: ${{ steps.out.outputs.TAG }}
+      SHOULD_BUILD: ${{ steps.out.outputs.SHOULD_BUILD }}
+    steps:
+      - name: Pick version
+        id: out
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG=$(curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/mattermost/mattermost/releases/latest \
+              | jq -r '.tag_name' | sed 's/^v//')
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building for version: $TAG"
+
+      - name: Check if image already exists in GHCR
+        id: check
+        env:
+          TAG: ${{ steps.out.outputs.TAG }}
+        run: |
+          IMAGE_PATH="${IMAGE#ghcr.io/}"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://ghcr.io/v2/${IMAGE_PATH}/manifests/${TAG} || true)
+          echo "GHCR manifest status for ${TAG}: ${CODE}"
+          if [ "$CODE" = "200" ]; then
+            echo "SHOULD_BUILD=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "SHOULD_BUILD=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build & Push (ARM64)
+    needs: discover
+    if: needs.discover.outputs.SHOULD_BUILD == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Mattermost source
+        uses: actions/checkout@v4
+        with:
+          repository: mattermost/mattermost
+          ref: v${{ needs.discover.outputs.TAG }}
+
+  
+      - name: Remove pinned digests
+        run: |
+          sed -i -E 's/(FROM [^@]+)@sha256:[a-f0-9]{64}(.*)/\1\2/' ./server/build/Dockerfile
+
+      - name: Setup QEMU // Change this if run own ARM64 runner
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (arm64)
+        id: bp
+        uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          file: ./server/build/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            MM_PACKAGE=team
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=Mattermost (Team Edition) ARM64
+            org.opencontainers.image.version=${{ needs.discover.outputs.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.run_started_at }}
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.discover.outputs.TAG }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Inspect pushed image
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ needs.discover.outputs.TAG }}
+
+      - name: Generate SBOM (optional)
+        if: ${{ github.event.inputs.sbom == 'true' }}
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}:${{ needs.discover.outputs.TAG }}
+          format: cyclonedx-json
+          artifact-name: sbom-mattermost-${{ needs.discover.outputs.TAG }}.cdx.json
+
+      - name: Cosign sign 
+        if: ${{ github.event.inputs.sign == 'true' }}
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless)  
+        if: ${{ github.event.inputs.sign == 'true' }}
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          TAG: ${{ needs.discover.outputs.TAG }}
+        run: |
+          echo "Signing $IMAGE:$TAG and :latest"
+          cosign sign --yes $IMAGE:$TAG
+          cosign sign --yes $IMAGE:latest
