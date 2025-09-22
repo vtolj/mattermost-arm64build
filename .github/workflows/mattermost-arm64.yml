@@ -97,7 +97,7 @@ jobs:
         id: bp
         uses: docker/build-push-action@v5
         with:
-          context: ./server
+          context: ./server/build
           file: ./server/build/Dockerfile
           platforms: linux/arm64
           push: true
