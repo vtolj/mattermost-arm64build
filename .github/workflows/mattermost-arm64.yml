@@ -73,7 +73,6 @@ jobs:
   build:
     name: Build & Push (ARM64)
     needs: discover
-    if: needs.discover.outputs.SHOULD_BUILD == 'false'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout Mattermost source
