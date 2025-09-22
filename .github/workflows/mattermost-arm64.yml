@@ -103,7 +103,9 @@ jobs:
           push: true
           provenance: false
           build-args: |
-            MM_PACKAGE=team
+            MM_PACKAGE=https://releases.mattermost.com/${{ needs.discover.outputs.TAG }}/mattermost-${{ needs.discover.outputs.TAG }}-linux-arm64.tar.gz
+            PUID=2000
+            PGID=2000
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=Mattermost (Team Edition) ARM64
